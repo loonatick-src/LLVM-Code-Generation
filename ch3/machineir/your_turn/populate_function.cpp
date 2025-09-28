@@ -12,6 +12,20 @@
 
 using namespace llvm;
 
+// Turn C++ into a tolerable language
+#ifndef let
+#define let const auto
+#else
+#error "Who TF defined `let`"
+#endif
+
+#ifndef var
+#define var auto
+#else
+#error "Who TF defined `var`"
+#endif
+
+
 // The goal of this function is to build a MachineFunction that
 // represents the lowering of the following foo, a C function:
 // extern int baz();
@@ -50,7 +64,65 @@ MachineFunction *populateMachineIR(MachineModuleInfo &MMI, Function &Foo,
   // The stack slot for var.
   int FrameIndex = MF.getFrameInfo().CreateStackObject(32, VarStackAlign,
                                                        /*IsSpillSlot=*/false);
+  // Create BBs
+  var *entryBB = MF.CreateMachineBasicBlock();
+  MF.push_back(entryBB);
+  var *bb1 = MF.CreateMachineBasicBlock();
+  MF.push_back(bb1);
+  var *bb2 = MF.CreateMachineBasicBlock();
+  MF.push_back(bb2);
+  // build CFG
+  entryBB->addSuccessor(bb1);
+  entryBB->addSuccessor(bb2);
+  bb1->addSuccessor(bb2);
+  // build the IR, one BB at a time
+  // entryBB
+  var builder = MachineIRBuilder(*entryBB, entryBB->end());
+  // input operands
+  Register A = builder.buildCopy(I32, W0).getReg(0);
+  Register B = builder.buildCopy(I32, W1).getReg(0);
+  // allocate variable on stack for a + b
+  Register addABStackAddr = builder.buildFrameIndex(VarAddrLLT, FrameIndex).getReg(0);
+  // add
+  Register addResult = builder.buildAdd(I32, A, B).getReg(0);
+  // store result in stack
+  builder.buildStore(addResult, addABStackAddr, PtrInfo, VarStackAlign);
+  // compare add result with constant
+  Register const0xFF = builder.buildConstant(I32, 0xFF).getReg(0);
+  addResult = builder.buildLoad(I32, addABStackAddr, PtrInfo, VarStackAlign).getReg(0);
+  Register cmp = builder.buildICmp(CmpInst::ICMP_EQ, I1, addResult, const0xFF).getReg(0);
+  // cond br
+  builder.buildBrCond(cmp, *bb1);
+  builder.buildBr(*bb2);
 
-  // TODO: Populate MF.
+  // bb1
+  builder.setInsertPt(*bb1, bb1->end());
+  addResult = builder.buildLoad(I32, addABStackAddr, PtrInfo, VarStackAlign).getReg(0);
+  // arm ABI calling convention
+  builder.buildCopy(W0, addResult);
+  builder.buildInstr(TargetOpcode::INLINEASM, {}, {})
+		.addExternalSymbol("bl @bar")
+		.addImm(0)
+		.addReg(W0, RegState::Implicit);
+  builder.buildInstr(TargetOpcode::INLINEASM, {}, {})
+		.addExternalSymbol("bl @baz")
+		.addImm(0)
+		.addReg(W0, RegState::Implicit | RegState::Define);
+  Register bazResult = builder.buildCopy(I32, W0).getReg(0);
+  builder.buildStore(bazResult, addABStackAddr, PtrInfo, VarStackAlign);
+ 
+  // bb2
+  builder.setInsertPt(*bb2, bb2->end());
+  addResult = builder.buildLoad(I32, addABStackAddr, PtrInfo, VarStackAlign).getReg(0);
+  builder.buildCopy(W0, addResult);
+  builder.buildInstr(TargetOpcode::INLINEASM, {}, {})
+		.addExternalSymbol("bl @bar")
+		.addImm(0)
+		.addReg(W0, RegState::Implicit);
+  builder.buildInstr(TargetOpcode::INLINEASM, {}, {})
+		.addExternalSymbol("ret")
+		.addImm(0);
   return &MF;
 }
+#undef let
+#undef var
